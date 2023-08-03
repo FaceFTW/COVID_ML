@@ -1,0 +1,927 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"},{"aliases":[],"languageName":"R","name":"RKernel"}]}}
+
+#!markdown
+
+# R Kernel Setup
+
+#!csharp
+
+#!connect jupyter --kernel-name RKernel --kernel-spec ir
+
+#!RKernel
+
+install.packages("gmodels")
+install.packages("class")
+install.packages("e1071")
+install.packages("C50")
+install.packages("rpart")
+install.packages("rpart.plot")
+install.packages("neuralnet")
+install.packages("arules")
+
+#!markdown
+
+# Data Filter (C#)
+
+#!csharp
+
+//data filtering
+
+using System.IO;
+
+var rows = File.ReadLines("COVID-DATA.csv");
+int currentRow = 0;
+int validCases = 0;
+int filteredCases_missinginfo = 0;
+int filteredCases_probableStatus = 0;
+
+//Clean the target file if it exists
+// if (File.Exists("filtered_data.csv")) {
+// 	File.Delete("filtered_data.csv");
+// }
+// File.CreateText("filtered_data.csv");
+
+//Write to file
+using (var writer = File.CreateText("filtered_data.csv")) {
+	//CSV Header
+	//Use if for regression trees
+	writer.WriteLine("days_since,state,age_group,sex,exposure_yn,symptom_status,hosp_yn,icu_yn,underlying_conditions_yn,death_yn");
+	
+	//Use the following header for other algorithms
+	// writer.WriteLine("state,age_group,sex,exposure_yn,symptom_status,hosp_yn,icu_yn,underlying_conditions_yn,death_yn");
+
+	foreach (var row in rows) {
+		if (currentRow == 0) {
+			currentRow++;
+			continue;
+		};
+
+		var columns = row.Split(',');
+
+		//Check if status is probable
+		if (columns[13] != "Laboratory-confirmed case") {
+			filteredCases_probableStatus++;
+			currentRow++;
+			continue;
+		}
+
+		var date = columns[0];
+
+		//Comment out if not using regression trees
+		if(date == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		DateTime dateObj = DateTime.Parse(date);
+		//Get difference from 1/1/2020
+		var daysSince = (dateObj - new DateTime(2020, 1, 1)).TotalDays;
+		if (daysSince < 0) {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var state = columns[1];
+		if(state == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var age_group = columns[5];
+		if(age_group == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var sex = columns[6];
+		if(sex == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		//var ethnicity = columns[7];	- //Only supports hispanic/non-hispanic?
+		// var identifying_process = columns[10];
+
+		var exposure_yn = columns[12];
+		if (exposure_yn == "Missing" || exposure_yn == "") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var symptom_status = columns[14];
+		if (symptom_status == "Missing" || symptom_status == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var hosp_yn = columns[15];
+		if (hosp_yn == "Missing" || hosp_yn == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var icu_yn = columns[16];
+		if (icu_yn == "Missing" || icu_yn == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var death_yn = columns[17];
+		if (death_yn == "Missing" || death_yn == "Unknown" || death_yn == "NA") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var underlying_conditions_yn = columns[18];
+		if (underlying_conditions_yn == "") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		//Regenerate Row
+		var rowData = new string[]{
+			daysSince.ToString(),
+			state,
+			age_group,
+			sex,
+			exposure_yn,
+			symptom_status,
+			hosp_yn,
+			icu_yn,
+			underlying_conditions_yn,
+			death_yn
+		};
+		var newCsvRow = string.Join(",", rowData);
+		writer.WriteLine(newCsvRow);
+
+		//Stat tracking for console
+		currentRow++;
+		validCases++;
+		if (currentRow % 1000000 == 0) {
+			Console.WriteLine("Processed " + currentRow + " rows");
+		}
+	}
+	writer.Close();
+	
+}
+Console.WriteLine("Total rows: " + currentRow);
+Console.WriteLine("Valid cases: " + validCases);
+Console.WriteLine("Filtered cases (missing info): " + filteredCases_missinginfo);
+Console.WriteLine("Filtered cases (probable status): " + filteredCases_probableStatus);
+Console.WriteLine("Filtered cases (total): " + (filteredCases_missinginfo + filteredCases_probableStatus));
+
+#!markdown
+
+# k-NN Modeling
+
+Currently causes R to fatally abort, hangs notebook.
+
+#!RKernel
+
+#################################################
+# Data Import
+#################################################
+covid_data <- read.csv("filtered_data.csv")
+covid_data <- covid_data[-1]
+covid_data$state <- as.factor(covid_data$state)
+covid_data$age_group <- as.factor(covid_data$age_group)
+covid_data$sex <- as.factor(covid_data$sex)
+covid_data$exposure_yn <- as.factor(covid_data$exposure_yn)
+covid_data$symptom_status <- as.factor(covid_data$symptom_status)
+covid_data$hosp_yn <- as.factor(covid_data$hosp_yn)
+covid_data$icu_yn <- as.factor(covid_data$icu_yn)
+covid_data$underlying_conditions_yn <- as.factor(covid_data$underlying_conditions_yn)
+covid_data$death_yn <- as.factor(covid_data$death_yn)
+
+str(covid_data)
+
+#################################################
+# KNN for death_yn
+#################################################
+library(class)
+library(gmodels)
+
+#use a subset of the data for training and testing
+training_count <- 300000
+testing_count <- 50000
+
+covid_data_train <- covid_data[1:training_count,1:7]
+covid_data_test <- covid_data[(training_count+1):(training_count+testing_count),1:7]
+covid_data_train_label <- covid_data[1:training_count,8]
+covid_data_test_label <- covid_data_test[(training_count + 1):(training_count + testing_count),8]
+
+covid_data_death_pred <- knn(train = covid_data_train, test = covid_data_test, cl = covid_data_train_label, k = 1581, use.all = FALSE)
+
+CrossTable(x=covid_data_test_label, y=covid_data_death_pred, prop.chisq = FALSE)
+
+#!markdown
+
+# Naive Bayes
+
+Top Cell includes State of Residence in the data set.
+
+Bottom Cell excludes State of Residence from the data set.
+
+#!RKernel
+
+#########################################
+# Data Import + Prep
+#########################################
+covid_data <- read.csv("filtered_data.csv")
+covid_data$state <- as.factor(covid_data$state)
+covid_data$age_group <- as.factor(covid_data$age_group)
+covid_data$sex <- as.factor(covid_data$sex)
+covid_data$exposure_yn <- as.factor(covid_data$exposure_yn)
+covid_data$symptom_status <- as.factor(covid_data$symptom_status)
+covid_data$hosp_yn <- as.factor(covid_data$hosp_yn)
+covid_data$icu_yn <- as.factor(covid_data$icu_yn)
+covid_data$underlying_conditions_yn <- as.factor(covid_data$underlying_conditions_yn)
+covid_data$death_yn <- as.factor(covid_data$death_yn)
+
+# check for blanks
+if(sum(is.na(covid_data)) > 0) {
+	stop("There are blanks in the data")
+} else {
+  print("There are no blanks in the data. Showing Preview:")
+  str(covid_data)
+}
+
+#########################################
+# Separating Training and Testing Data
+#########################################
+training_count <- 300000
+testing_count <- 59307
+
+covid_data_train <- covid_data[1:training_count,1:8]
+covid_data_test <- covid_data[(training_count+1):(training_count+testing_count),1:8]
+
+covid_data_train_label <- covid_data[1:training_count,9]
+covid_data_test_label <- covid_data[(training_count + 1):(training_count + testing_count),9]
+
+# check proportions
+print("Proportions of Datasets:")
+prop.table(table(covid_data_train_label))
+prop.table(table(covid_data_test_label))
+
+########################
+# Naive Bayes Model Below
+########################
+library(gmodels)
+library(e1071)
+
+model <- naiveBayes(covid_data_train, covid_data_train_label)
+predictions <- predict(model, covid_data_test, type = "class")
+
+CrossTable(x=predictions, y=covid_data_test_label, prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('predicted', 'actual'))
+
+#!RKernel
+
+#########################################
+# Data Import + Prep
+#########################################
+covid_data <- read.csv("filtered_data.csv")
+covid_data <- covid_data[-1]	# remove first column
+covid_data$age_group <- as.factor(covid_data$age_group)
+covid_data$sex <- as.factor(covid_data$sex)
+covid_data$exposure_yn <- as.factor(covid_data$exposure_yn)
+covid_data$symptom_status <- as.factor(covid_data$symptom_status)
+covid_data$hosp_yn <- as.factor(covid_data$hosp_yn)
+covid_data$icu_yn <- as.factor(covid_data$icu_yn)
+covid_data$underlying_conditions_yn <- as.factor(covid_data$underlying_conditions_yn)
+covid_data$death_yn <- as.factor(covid_data$death_yn)
+
+# check for blanks
+if(sum(is.na(covid_data)) > 0) {
+	stop("There are blanks in the data")
+} else {
+  print("There are no blanks in the data. Showing Preview:")
+  str(covid_data)
+}
+
+#########################################
+# Separating Training and Testing Data
+#########################################
+training_count <- 300000
+testing_count <- 59307
+
+covid_data_train <- covid_data[1:training_count,1:7]
+covid_data_test <- covid_data[(training_count+1):(training_count+testing_count),1:7]
+
+covid_data_train_label <- covid_data[1:training_count,8]
+covid_data_test_label <- covid_data[(training_count + 1):(training_count + testing_count),8]
+
+# check proportions
+print("Proportions of Datasets:")
+prop.table(table(covid_data_train_label))
+prop.table(table(covid_data_test_label))
+
+########################
+# Naive Bayes Model Below
+########################
+library(gmodels)
+library(e1071)
+
+model <- naiveBayes(covid_data_train, covid_data_train_label)
+predictions <- predict(model, covid_data_test, type = "class")
+
+CrossTable(x=predictions, y=covid_data_test_label, prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('predicted', 'actual'))
+
+#!markdown
+
+# Decision Tree (C5.0)
+
+#!RKernel
+
+#########################################
+# Data Import + Prep
+#########################################
+covid_data <- read.csv("filtered_data.csv")
+covid_data$state <- as.factor(covid_data$state)
+covid_data$age_group <- as.factor(covid_data$age_group)
+covid_data$sex <- as.factor(covid_data$sex)
+covid_data$exposure_yn <- as.factor(covid_data$exposure_yn)
+covid_data$symptom_status <- as.factor(covid_data$symptom_status)
+covid_data$hosp_yn <- as.factor(covid_data$hosp_yn)
+covid_data$icu_yn <- as.factor(covid_data$icu_yn)
+covid_data$underlying_conditions_yn <- as.factor(covid_data$underlying_conditions_yn)
+covid_data$death_yn <- as.factor(covid_data$death_yn)
+
+# check for blanks
+if(sum(is.na(covid_data)) > 0) {
+	stop("There are blanks in the data")
+} else {
+  print("There are no blanks in the data. Showing Preview:")
+  str(covid_data)
+}
+
+#########################################
+# Separating Training and Testing Data
+#########################################
+training_count <- 300000
+testing_count <- 59307
+
+print("Initializing RNG with seed");
+RNGversion("3.6.0");
+set.seed(1234)
+
+train_rows <- sample(1:nrow(covid_data), training_count)
+
+covid_data_train <- covid_data[train_rows,1:9]
+covid_data_test <- covid_data[-train_rows,1:9]
+
+# check proportions
+print("Proportions of Datasets:")
+prop.table(table(covid_data_train$death_yn))
+prop.table(table(covid_data_test$death_yn))
+
+########################
+# Decision Tree Time!
+########################
+library(C50)
+
+model <- C5.0(covid_data_train[-9], covid_data_train$death_yn, trials = 25)
+summary(model)
+
+predictions <- predict(model, covid_data_test, type = "class")
+
+library(gmodels)
+CrossTable(x=predictions, y=covid_data_test$death_yn, prop.chisq = FALSE, prop.c = FALSE, prop.r = FALSE, dnn = c('predicted', 'actual'))
+
+#!markdown
+
+# Regression Trees
+
+#!csharp
+
+//data filtering
+
+using System.IO;
+
+var rows = File.ReadLines("weekly_covid_deaths.csv");
+int currentRow = 0;
+int validCases = 0;
+int filteredCases_missinginfo = 0;
+int filteredCases_probableStatus = 0;
+
+//Write to file
+using (var writer = File.CreateText("weekly_deaths_converted_data.csv")) {
+	//CSV Header
+	writer.WriteLine("state,week,new_cases,total_cases,new_deaths,total_deaths");
+
+	foreach (var row in rows) {
+		if (currentRow == 0) {
+			currentRow++;
+			continue;
+		};
+
+		var columns = row.Split(',');
+
+		var state = columns[1];
+		var date= columns[3];	//use end date as point of reference (deaths actually happened then)
+		DateTime dateObj = DateTime.Parse(date);
+		//Get difference from 1/1/2020 in weeks
+		var weeksSince = (dateObj - new DateTime(2020, 1, 1)).TotalDays / 7;
+		
+		var total_cases = columns[4];
+		var new_cases = columns[5];
+		var total_deaths = columns[6];
+		var new_deaths = columns[7];
+		// var historic_deaths = columns[8];
+		// var new_historic_deaths = columns[9];
+		
+		//Regenerate Row
+		var rowData = new string[]{
+			state,
+			weeksSince.ToString(),
+			new_cases,
+			total_cases,
+			new_deaths,
+			total_deaths
+		};
+		var newCsvRow = string.Join(",", rowData);
+		writer.WriteLine(newCsvRow);
+
+		//Stat tracking for console
+		currentRow++;
+		validCases++;
+		if (currentRow % 1000000 == 0) {
+			Console.WriteLine("Processed " + currentRow + " rows");
+		}
+	}
+	writer.Close();
+	
+}
+Console.WriteLine("Total rows: " + currentRow);
+Console.WriteLine("Valid cases: " + validCases);
+Console.WriteLine("Filtered cases (missing info): " + filteredCases_missinginfo);
+Console.WriteLine("Filtered cases (probable status): " + filteredCases_probableStatus);
+Console.WriteLine("Filtered cases (total): " + (filteredCases_missinginfo + filteredCases_probableStatus));
+
+#!RKernel
+
+#########################################
+# Data Import + Prep
+#########################################
+covid_data <- read.csv("weekly_deaths_converted_data.csv", stringsAsFactors = TRUE)
+covid_data$state <- as.numeric(covid_data$state)
+
+# All other data should be coerced into numeric/int by default
+
+#########################################
+# Separating Training and Testing Data
+#########################################
+training_count <- 8380
+testing_count <- 2000
+
+# After adjustment data seems to be ordered, so we need to shuffle it
+print("Initializing RNG with seed");
+RNGversion("3.6.0");
+set.seed(1234)
+
+train_rows <- sample(1:nrow(covid_data), training_count)
+covid_data_train <- covid_data[train_rows,]
+covid_data_test <- covid_data[-train_rows,]
+
+########################
+# Regression Tree Time!
+########################
+library(rpart)
+library(rpart.plot)
+
+model_default <- rpart(total_deaths ~ ., data = covid_data_train)
+predict_default <- predict(model_default, covid_data_test)
+
+# Plot the tree
+rpart.plot(model_default, digits = 3, fallen.leaves = TRUE, type = 4, extra = 1)
+
+# summarize results
+print("Summary (Test Data Predicted):")
+summary(predict_default) 
+print("Summary (Test Data Actual):")
+summary(covid_data_test$total_deaths)
+print("Correlation:")
+cor(predict_default, covid_data_test$total_deaths)
+
+MAE <- function(actual, predicted) {
+  mean(abs(actual - predicted))  
+}
+print("MAE (base): ")
+MAE(covid_data_test$total_deaths, predict_default)
+print("Mean (base): ")
+mean(covid_data_train$total_deaths)
+print("MAE (avg): ")
+MAE(mean(covid_data_train$total_deaths),covid_data_test$total_deaths)
+
+#!markdown
+
+# Neural Networks
+
+Not doing SVNs as this is mostly factor-based data.
+
+#!csharp
+
+//data filtering
+
+using System.IO;
+
+var rows = File.ReadLines("COVID-DATA.csv");
+int currentRow = 0;
+int validCases = 0;
+int filteredCases_missinginfo = 0;
+int filteredCases_probableStatus = 0;
+
+//Write to file
+using (var writer = File.CreateText("filtered_data_nn.csv")) {
+	//CSV Header
+	writer.WriteLine("weeks_since,state,age_group,sex,exposure_yn,symptom_status,hosp_yn,icu_yn,underlying_conditions_yn,death_yn");
+	
+	foreach (var row in rows) {
+		if (currentRow == 0) {
+			currentRow++;
+			continue;
+		};
+
+		var columns = row.Split(',');
+
+		//Check if status is probable
+		if (columns[13] != "Laboratory-confirmed case") {
+			filteredCases_probableStatus++;
+			currentRow++;
+			continue;
+		}
+
+		var date = columns[0];
+
+		//Comment out if not using regression trees
+		if(date == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		DateTime dateObj = DateTime.Parse(date);
+		//Get difference from 1/1/2020
+		var weeks_since = Math.Round((dateObj - new DateTime(2020, 1, 1)).TotalDays / 7);
+		if (weeks_since < 0) {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var state = columns[1];
+		if(state == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var age_group = columns[5];
+		if(age_group == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var sex = columns[6];
+		if(sex == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		//var ethnicity = columns[7];	- //Only supports hispanic/non-hispanic?
+		// var identifying_process = columns[10];
+
+		var exposure_yn = columns[12];
+		if (exposure_yn == "Missing" || exposure_yn == "") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var symptom_status = columns[14];
+		if (symptom_status == "Missing" || symptom_status == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var hosp_yn = columns[15];
+		if (hosp_yn == "Missing" || hosp_yn == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var icu_yn = columns[16];
+		if (icu_yn == "Missing" || icu_yn == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var death_yn = columns[17];
+		if (death_yn == "Missing" || death_yn == "Unknown" || death_yn == "NA") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var underlying_conditions_yn = columns[18];
+		if (underlying_conditions_yn == "") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		//Regenerate Row
+		var rowData = new string[]{
+			weeks_since.ToString(),
+			state,
+			age_group,
+			sex,
+			exposure_yn,
+			symptom_status,
+			hosp_yn,
+			icu_yn,
+			underlying_conditions_yn,
+			death_yn
+		};
+		var newCsvRow = string.Join(",", rowData);
+		writer.WriteLine(newCsvRow);
+
+		//Stat tracking for console
+		currentRow++;
+		validCases++;
+		if (currentRow % 1000000 == 0) {
+			Console.WriteLine("Processed " + currentRow + " rows");
+		}
+	}
+	writer.Close();
+	
+}
+Console.WriteLine("Total rows: " + currentRow);
+Console.WriteLine("Valid cases: " + validCases);
+Console.WriteLine("Filtered cases (missing info): " + filteredCases_missinginfo);
+Console.WriteLine("Filtered cases (probable status): " + filteredCases_probableStatus);
+Console.WriteLine("Filtered cases (total): " + (filteredCases_missinginfo + filteredCases_probableStatus));
+
+#!RKernel
+
+# Normalization function
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+#########################################
+# Data Import + Prep
+#########################################
+covid_data <- read.csv("filtered_data_nn.csv", stringsAsFactors = TRUE)
+covid_data <- covid_data[-2]
+# coerce for normalization
+covid_data <- as.data.frame(lapply(covid_data, as.numeric))
+covid_data_norm <- as.data.frame(lapply(covid_data, normalize))
+
+# check for blanks
+if(sum(is.na(covid_data)) > 0) {
+	stop("There are blanks in the data")
+} else {
+  print("There are no blanks in the data. Showing Preview:")
+  str(covid_data_norm)
+}
+
+#########################################
+# Separating Training and Testing Data
+#########################################
+training_count <- 50000
+testing_count <- 10000
+
+print("Initializing RNG with seed");
+RNGversion("3.6.0");
+set.seed(1234)
+
+subset <- sample(1:nrow(covid_data_norm), training_count + testing_count)
+train_rows <- subset[1:training_count]
+test_rows <- subset[(training_count + 1):(training_count + testing_count)]
+
+covid_data_train <- covid_data_norm[train_rows,1:9]
+covid_data_test <- covid_data_norm[test_rows,1:9]
+
+
+########################
+# Neural Net Time!
+########################
+library(neuralnet)
+
+covid_model <- neuralnet(death_yn ~ weeks_since + age_group
+						+sex + exposure_yn + symptom_status + hosp_yn
+						+ icu_yn + underlying_conditions_yn, 
+						data=covid_data_train, 
+						hidden=5,
+						thresh = 0.1, 
+						act.fct = "logistic", 
+						linear.output = TRUE,
+						lifesign = "full",
+						lifesign.step = 1000,
+						)
+predictions <- predict(covid_model, covid_data_test[1:9])
+
+# Plot the model
+plot(covid_model)
+
+# # summarize results
+# print("Summary (Test Data Predicted):")
+# summary(table(predictions$net.result))
+# print("Summary (Test Data Actual):")
+# summary(table(covid_data_test$death_yn))
+
+#!markdown
+
+# Market Basket Analysis
+
+A Priori Association Rules Algortihm Used
+
+#!csharp
+
+//data filtering
+
+using System.IO;
+
+var rows = File.ReadLines("COVID-DATA.csv");
+int currentRow = 0;
+int validCases = 0;
+int filteredCases_missinginfo = 0;
+int filteredCases_probableStatus = 0;
+
+//Write to file
+using (var writer = File.CreateText("filtered_data_arules.csv")) {
+	//Will be parsed into a sparse matrix in R
+	foreach (var row in rows) {
+		if (currentRow == 0) {
+			currentRow++;
+			continue;
+		};
+
+		var columns = row.Split(',');
+
+		//Check if status is probable
+		if (columns[13] != "Laboratory-confirmed case") {
+			filteredCases_probableStatus++;
+			currentRow++;
+			continue;
+		}
+
+		var date = columns[0];
+
+		//Comment out if not using regression trees
+		if(date == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		DateTime dateObj = DateTime.Parse(date);
+		//Figure out which quarter the date is in
+		var quarter = (dateObj.Month - 1) / 3 + 1;
+		var quarterString = "Q" + quarter.ToString()+ " " + dateObj.Year.ToString();
+		if (dateObj <= DateTime.Parse("2020-01-01")) {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var state = columns[1];
+		if(state == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var age_group = columns[5];
+		if(age_group == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+		var sex = columns[6];
+		if(sex == "NA"){
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var exposure_yn = columns[12] switch {
+			"Yes" => "Had Exposure",
+			"Unknown" => "No Known Exposure",
+			_ => "SKIP"
+		};
+		if (exposure_yn == "SKIP") {
+				filteredCases_missinginfo++;
+				currentRow++;
+				continue;
+		};
+
+		var symptom_status = columns[14];
+		if (symptom_status == "Missing" || symptom_status == "Unknown") {
+			filteredCases_missinginfo++;
+			currentRow++;
+			continue;
+		}
+
+		var hosp_yn =  columns[15] switch {
+			"Yes"=> "Hospitalized",
+			"No" => "Not Hospitalized",
+			_ => "SKIP"
+		};
+		if (hosp_yn == "SKIP") {
+				filteredCases_missinginfo++;
+				currentRow++;
+				continue;
+		}
+
+		var icu_yn = columns[16] switch {
+			"Yes" => "ICU Case",
+			"No" => "Not ICU Case",
+			_ => "SKIP"
+		};
+		if (icu_yn == "SKIP") {
+				filteredCases_missinginfo++;
+				currentRow++;
+				continue;
+		}
+
+
+		var death_yn = columns[17] switch {
+ 			"Yes"=> "Death",
+			"No" => "Survived",
+			_ => "SKIP"
+		};
+		if (death_yn == "SKIP") {
+				filteredCases_missinginfo++;
+				currentRow++;
+				continue;
+		}
+
+		var underlying_conditions_yn = columns[18] switch {
+			"Yes" => "Has Underlying Conditions",
+			"No" => "No Underlying Conditions",
+			_ => "SKIP"
+		};
+		if (underlying_conditions_yn == "SKIP") {
+				filteredCases_missinginfo++;
+				currentRow++;
+				continue;
+		}
+
+		//Regenerate Row
+		var rowData = new string[]{
+			quarterString,
+			state,
+			age_group,
+			sex,
+			exposure_yn,
+			symptom_status,
+			hosp_yn,
+			icu_yn,
+			underlying_conditions_yn,
+			death_yn
+		};
+		var newCsvRow = string.Join(",", rowData);
+		writer.WriteLine(newCsvRow);
+
+		//Stat tracking for console
+		currentRow++;
+		validCases++;
+		if (currentRow % 1000000 == 0) {
+			Console.WriteLine("Processed " + currentRow + " rows");
+		}
+	}
+	writer.Close();
+
+}
+Console.WriteLine("Total rows: " + currentRow);
+Console.WriteLine("Valid cases: " + validCases);
+Console.WriteLine("Filtered cases (missing info): " + filteredCases_missinginfo);
+Console.WriteLine("Filtered cases (probable status): " + filteredCases_probableStatus);
+Console.WriteLine("Filtered cases (total): " + (filteredCases_missinginfo + filteredCases_probableStatus));
+
+#!RKernel
+
+library(arules)
+#covid_data <- read.transactions("filtered_data_arules.csv", format = "basket", sep = ",")
+summary(covid_data)
+itemFrequencyPlot(covid_data, topN = 20, type = "absolute")
+image(sample(covid_data, 1000), main = "Sample of 1k Random Cases", aspect="fill")
+
+#rules <- apriori(covid_data, parameter = list(supp = 0.001, conf = 0.8, minlen = 4, maxlen = 10))
+summary(rules)
+
+# Subset rules for deaths/Survived
+#death_rules <- subset(rules, subset = rhs %pin% "Death")
+#survived_rules <- subset(rules, subset = rhs %pin% "Survived")
+
+inspect(sort(death_rules, by="lift"))
+inspect(sort(survived_rules, by="lift"))
