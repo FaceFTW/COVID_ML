@@ -1,4 +1,3 @@
-setwd("C:\\Users\\awest\\Workspaces\\CSSE286")
 # Data Prep
 covid_data <- read.csv("filtered_data.csv")
 
